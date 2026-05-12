@@ -1,0 +1,242 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// CORE — transversal à toutes les bulles
+// ─────────────────────────────────────────────
+
+model User {
+  id          String   @id @default(uuid())
+  email       String   @unique
+  username    String   @unique
+  avatarUrl   String?
+  bio         String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  subscriptions  Subscription[]
+  todoItems      TodoItem[]
+  activityFeed   ActivityFeed[]
+  bubbleItems    BubbleItem[]
+  userModules    UserModule[]
+  sentFriendships     Friendship[] @relation("Requester")
+  receivedFriendships Friendship[] @relation("Addressee")
+  notifications  Notification[]
+
+  @@map("users")
+}
+
+model Friendship {
+  id          String           @id @default(uuid())
+  requesterId String
+  addresseeId String
+  status      FriendshipStatus @default(PENDING)
+  createdAt   DateTime         @default(now())
+
+  requester User @relation("Requester", fields: [requesterId], references: [id])
+  addressee User @relation("Addressee", fields: [addresseeId], references: [id])
+
+  @@unique([requesterId, addresseeId])
+  @@map("friendships")
+}
+
+enum FriendshipStatus {
+  PENDING
+  ACCEPTED
+  BLOCKED
+}
+
+// ─────────────────────────────────────────────
+// BULLES & MODULES — registre
+// ─────────────────────────────────────────────
+
+model Bubble {
+  slug         String  @id          // "gaming", "music", "films"
+  name         String
+  icon         String               // emoji ou nom d'icône
+  description  String?
+  isFree       Boolean @default(true)
+  priceMonthly Decimal?
+
+  modules       BubbleModule[]
+  subscriptions Subscription[]
+
+  @@map("bubbles")
+}
+
+model BubbleModule {
+  slug        String  @id            // "gaming.achievements", "music.concerts"
+  bubbleSlug  String
+  name        String
+  version     String  @default("1.0.0")
+  isActive    Boolean @default(true)
+
+  bubble      Bubble       @relation(fields: [bubbleSlug], references: [slug])
+  userModules UserModule[]
+
+  @@map("bubble_modules")
+}
+
+// Ce que chaque user a activé
+model UserModule {
+  userId      String
+  moduleSlug  String
+  tier        ModuleTier @default(FREE)
+  enabledAt   DateTime   @default(now())
+
+  user   User         @relation(fields: [userId], references: [id])
+  module BubbleModule @relation(fields: [moduleSlug], references: [slug])
+
+  @@id([userId, moduleSlug])
+  @@map("user_modules")
+}
+
+enum ModuleTier {
+  FREE
+  PLUS
+  PRO
+}
+
+// ─────────────────────────────────────────────
+// ABONNEMENTS
+// ─────────────────────────────────────────────
+
+model Subscription {
+  id                   String             @id @default(uuid())
+  userId               String
+  bubbleSlug           String
+  stripeSubscriptionId String?
+  status               SubscriptionStatus @default(ACTIVE)
+  currentPeriodEnd     DateTime?
+  createdAt            DateTime           @default(now())
+
+  user   User   @relation(fields: [userId], references: [id])
+  bubble Bubble @relation(fields: [bubbleSlug], references: [slug])
+
+  @@map("subscriptions")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  PAST_DUE
+  TRIALING
+}
+
+// ─────────────────────────────────────────────
+// TODO — universel cross-bulles
+// ─────────────────────────────────────────────
+
+model TodoItem {
+  id           String     @id @default(uuid())
+  userId       String
+  title        String
+  description  String?
+  status       TodoStatus @default(PENDING)
+  priority     Int        @default(0)  // 0=normal, 1=high, 2=urgent
+
+  // Lien vers la bulle source (optionnel)
+  sourceBubble String?    // "music", "films", "gaming"
+  sourceModule String?    // "music.concerts"
+  sourceRefId  String?    // ID externe (ex: ID du concert)
+  sourceData   Json?      // Données enrichies de la source
+
+  dueAt     DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("todo_items")
+}
+
+enum TodoStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+// ─────────────────────────────────────────────
+// BUBBLE ITEMS — table universelle de tous les modules
+// ─────────────────────────────────────────────
+
+model BubbleItem {
+  id          String   @id @default(uuid())
+  userId      String
+  bubbleSlug  String   // "gaming"
+  moduleSlug  String   // "gaming.achievements"
+  itemType    String   // "achievement", "concert", "watchlist_film"
+  externalId  String?  // ID chez Steam, Spotify, TMDB...
+  data        Json     // Payload libre par module
+  isPublic    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, bubbleSlug])
+  @@index([userId, moduleSlug])
+  @@map("bubble_items")
+}
+
+// ─────────────────────────────────────────────
+// ACTIVITY FEED — social cross-bulles
+// ─────────────────────────────────────────────
+
+model ActivityFeed {
+  id         String   @id @default(uuid())
+  userId     String
+  bubbleSlug String
+  actionType String   // "achievement.unlocked", "film.watched", "concert.saved"
+  payload    Json
+  isPublic   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@map("activity_feed")
+}
+
+// ─────────────────────────────────────────────
+// EVENTS — bus d'événements inter-modules
+// ─────────────────────────────────────────────
+
+model BubbleEvent {
+  id        String   @id @default(uuid())
+  userId    String
+  eventType String   // "music.concert.saved" → déclenche TodoProvider
+  payload   Json
+  processed Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([processed, createdAt])
+  @@map("bubble_events")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────
+
+model Notification {
+  id         String           @id @default(uuid())
+  userId     String
+  type       String           // "concert.reminder", "friend.achievement"
+  title      String
+  body       String
+  payload    Json?
+  isRead     Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
